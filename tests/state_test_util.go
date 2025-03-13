@@ -19,7 +19,6 @@ package tests
 import (
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -28,7 +27,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
-	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -42,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/triedb/hashdb"
 	"github.com/ethereum/go-ethereum/trie/triedb/pathdb"
+	"github.com/holiman/uint256"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -63,7 +62,7 @@ func (t *StateTest) UnmarshalJSON(in []byte) error {
 
 type stJSON struct {
 	Env  stEnv                    `json:"env"`
-	Pre  types.GenesisAlloc       `json:"pre"`
+	Pre  core.GenesisAlloc        `json:"pre"`
 	Tx   stTransaction            `json:"transaction"`
 	Out  hexutil.Bytes            `json:"out"`
 	Post map[string][]stPostState `json:"post"`
@@ -118,8 +117,10 @@ type stTransaction struct {
 	GasLimit             []uint64            `json:"gasLimit"`
 	Value                []string            `json:"value"`
 	PrivateKey           []byte              `json:"secretKey"`
+	Sender               *common.Address     `json:"sender"`
 	BlobVersionedHashes  []common.Hash       `json:"blobVersionedHashes,omitempty"`
 	BlobGasFeeCap        *big.Int            `json:"maxFeePerBlobGas,omitempty"`
+	AuthorizationList    []*stAuthorization  `json:"authorizationList,omitempty"`
 }
 
 type stTransactionMarshaling struct {
@@ -130,6 +131,27 @@ type stTransactionMarshaling struct {
 	GasLimit             []math.HexOrDecimal64
 	PrivateKey           hexutil.Bytes
 	BlobGasFeeCap        *math.HexOrDecimal256
+}
+
+//go:generate go run github.com/fjl/gencodec -type stAuthorization -field-override stAuthorizationMarshaling -out gen_stauthorization.go
+
+// Authorization is an authorization from an account to deploy code at it's address.
+type stAuthorization struct {
+	ChainID *big.Int       `json:"chainId" gencodec:"required"`
+	Address common.Address `json:"address" gencodec:"required"`
+	Nonce   uint64         `json:"nonce" gencodec:"required"`
+	V       uint8          `json:"v" gencodec:"required"`
+	R       *big.Int       `json:"r" gencodec:"required"`
+	S       *big.Int       `json:"s" gencodec:"required"`
+}
+
+// field type overrides for gencodec
+type stAuthorizationMarshaling struct {
+	ChainID *math.HexOrDecimal256
+	Nonce   math.HexOrDecimal64
+	V       math.HexOrDecimal64
+	R       *math.HexOrDecimal256
+	S       *math.HexOrDecimal256
 }
 
 // GetChainConfig takes a fork definition and returns a chain config.
@@ -170,13 +192,7 @@ func (t *StateTest) Subtests() []StateSubtest {
 }
 
 // Run executes a specific subtest and verifies the post-state and logs
-func (t *StateTest) Run(
-	subtest StateSubtest,
-	vmconfig vm.Config,
-	snapshotter bool,
-	scheme string,
-	postCheck func(err error, snaps *snapshot.Tree, state *state.StateDB),
-) (result error) {
+func (t *StateTest) Run(subtest StateSubtest, vmconfig vm.Config, snapshotter bool, scheme string, postCheck func(err error, snaps *snapshot.Tree, state *state.StateDB)) (result error) {
 	triedb, snaps, statedb, root, err := t.RunNoVerify(subtest, vmconfig, snapshotter, scheme)
 	if err != nil {
 		return err
@@ -227,17 +243,6 @@ func (t *StateTest) RunNoVerify(subtest StateSubtest, vmconfig vm.Config, snapsh
 		return nil, nil, nil, common.Hash{}, err
 	}
 
-	{ // Blob transactions may be present after the Cancun fork.
-		// In production,
-		// - the header is verified against the max in eip4844.go:VerifyEIP4844Header
-		// - the block body is verified against the header in block_validator.go:ValidateBody
-		// Here, we just do this shortcut smaller fix, since state tests do not
-		// utilize those codepaths
-		if len(msg.BlobHashes())*params.BlobTxBlobGasPerBlob > params.MaxBlobGasPerBlock {
-			return nil, nil, nil, common.Hash{}, errors.New("blob gas exceeds maximum")
-		}
-	}
-
 	// Try to recover tx with current signer
 	if len(post.TxBytes) != 0 {
 		var ttx types.Transaction
@@ -258,9 +263,6 @@ func (t *StateTest) RunNoVerify(subtest StateSubtest, vmconfig vm.Config, snapsh
 	context.BaseFee = baseFee
 	if t.json.Env.Difficulty != nil {
 		context.Difficulty = new(big.Int).Set(t.json.Env.Difficulty)
-	}
-	if config.IsCancun(new(big.Int)) && t.json.Env.ExcessBlobGas != nil {
-		context.BlobBaseFee = eip4844.CalcBlobFee(*t.json.Env.ExcessBlobGas)
 	}
 	evm := vm.NewEVM(context, txContext, statedb, config, vmconfig)
 	// Execute the message.
@@ -288,7 +290,7 @@ func (t *StateTest) gasLimit(subtest StateSubtest) uint64 {
 	return t.json.Tx.GasLimit[t.json.Post[subtest.Fork][subtest.Index].Indexes.Gas]
 }
 
-func MakePreState(db ethdb.Database, accounts types.GenesisAlloc, snapshotter bool, scheme string) (*trie.Database, *snapshot.Tree, *state.StateDB) {
+func MakePreState(db ethdb.Database, accounts core.GenesisAlloc, snapshotter bool, scheme string) (*trie.Database, *snapshot.Tree, *state.StateDB) {
 	tconf := &trie.Config{Preimages: true}
 	if scheme == rawdb.HashScheme {
 		tconf.HashDB = hashdb.Defaults
@@ -396,9 +398,23 @@ func (tx *stTransaction) toMessage(ps stPostState, baseFee *big.Int) (core.Messa
 	if gasPrice == nil {
 		return nil, fmt.Errorf("no gas price provided")
 	}
+	var authList []types.SetCodeAuthorization
+	if tx.AuthorizationList != nil {
+		authList = make([]types.SetCodeAuthorization, len(tx.AuthorizationList))
+		for i, auth := range tx.AuthorizationList {
+			authList[i] = types.SetCodeAuthorization{
+				ChainID: *uint256.MustFromBig(auth.ChainID),
+				Address: auth.Address,
+				Nonce:   auth.Nonce,
+				V:       auth.V,
+				R:       *uint256.MustFromBig(auth.R),
+				S:       *uint256.MustFromBig(auth.S),
+			}
+		}
+	}
 
 	msg := types.NewMessage(from, to, tx.Nonce, value, gasLimit, gasPrice,
-		tx.MaxFeePerGas, tx.MaxPriorityFeePerGas, data, accessList, false, tx.BlobGasFeeCap, tx.BlobVersionedHashes)
+		tx.MaxFeePerGas, tx.MaxPriorityFeePerGas, data, accessList, false, nil, nil, authList)
 	return msg, nil
 }
 

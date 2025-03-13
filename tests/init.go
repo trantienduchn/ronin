@@ -181,7 +181,6 @@ var Forks = map[string]*params.ChainConfig{
 		MuirGlacierBlock:    big.NewInt(0),
 		BerlinBlock:         big.NewInt(0),
 		LondonBlock:         big.NewInt(0),
-		VenokiBlock:         big.NewInt(0),
 	},
 	"ArrowGlacier": {
 		ChainID:             big.NewInt(1),
@@ -198,7 +197,7 @@ var Forks = map[string]*params.ChainConfig{
 		LondonBlock:         big.NewInt(0),
 		ArrowGlacierBlock:   big.NewInt(0),
 	},
-	"Shanghai": {
+	"Prague": {
 		ChainID:             big.NewInt(1),
 		HomesteadBlock:      big.NewInt(0),
 		EIP150Block:         big.NewInt(0),
@@ -213,26 +212,9 @@ var Forks = map[string]*params.ChainConfig{
 		LondonBlock:         big.NewInt(0),
 		ArrowGlacierBlock:   big.NewInt(0),
 		ShanghaiBlock:       big.NewInt(0),
+		CancunBlock:         big.NewInt(0),
 		VenokiBlock:         big.NewInt(0),
-	},
-	"Cancun": {
-		ChainID:                 big.NewInt(1),
-		HomesteadBlock:          big.NewInt(0),
-		EIP150Block:             big.NewInt(0),
-		EIP155Block:             big.NewInt(0),
-		EIP158Block:             big.NewInt(0),
-		ByzantiumBlock:          big.NewInt(0),
-		ConstantinopleBlock:     big.NewInt(0),
-		PetersburgBlock:         big.NewInt(0),
-		IstanbulBlock:           big.NewInt(0),
-		MuirGlacierBlock:        big.NewInt(0),
-		BerlinBlock:             big.NewInt(0),
-		LondonBlock:             big.NewInt(0),
-		ArrowGlacierBlock:       big.NewInt(0),
-		ShanghaiBlock:           big.NewInt(0),
-		CancunBlock:             big.NewInt(0),
-		TerminalTotalDifficulty: big.NewInt(0),
-		VenokiBlock:             big.NewInt(0),
+		PragueBlock:         big.NewInt(0),
 	},
 }
 
