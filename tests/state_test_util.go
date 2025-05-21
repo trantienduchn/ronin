@@ -19,6 +19,7 @@ package tests
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -62,7 +64,7 @@ func (t *StateTest) UnmarshalJSON(in []byte) error {
 
 type stJSON struct {
 	Env  stEnv                    `json:"env"`
-	Pre  core.GenesisAlloc        `json:"pre"`
+	Pre  types.GenesisAlloc       `json:"pre"`
 	Tx   stTransaction            `json:"transaction"`
 	Out  hexutil.Bytes            `json:"out"`
 	Post map[string][]stPostState `json:"post"`
@@ -192,7 +194,13 @@ func (t *StateTest) Subtests() []StateSubtest {
 }
 
 // Run executes a specific subtest and verifies the post-state and logs
-func (t *StateTest) Run(subtest StateSubtest, vmconfig vm.Config, snapshotter bool, scheme string, postCheck func(err error, snaps *snapshot.Tree, state *state.StateDB)) (result error) {
+func (t *StateTest) Run(
+	subtest StateSubtest,
+	vmconfig vm.Config,
+	snapshotter bool,
+	scheme string,
+	postCheck func(err error, snaps *snapshot.Tree, state *state.StateDB),
+) (result error) {
 	triedb, snaps, statedb, root, err := t.RunNoVerify(subtest, vmconfig, snapshotter, scheme)
 	if err != nil {
 		return err
@@ -243,6 +251,17 @@ func (t *StateTest) RunNoVerify(subtest StateSubtest, vmconfig vm.Config, snapsh
 		return nil, nil, nil, common.Hash{}, err
 	}
 
+	{ // Blob transactions may be present after the Cancun fork.
+		// In production,
+		// - the header is verified against the max in eip4844.go:VerifyEIP4844Header
+		// - the block body is verified against the header in block_validator.go:ValidateBody
+		// Here, we just do this shortcut smaller fix, since state tests do not
+		// utilize those codepaths
+		if len(msg.BlobHashes())*params.BlobTxBlobGasPerBlob > params.MaxBlobGasPerBlock {
+			return nil, nil, nil, common.Hash{}, errors.New("blob gas exceeds maximum")
+		}
+	}
+
 	// Try to recover tx with current signer
 	if len(post.TxBytes) != 0 {
 		var ttx types.Transaction
@@ -263,6 +282,9 @@ func (t *StateTest) RunNoVerify(subtest StateSubtest, vmconfig vm.Config, snapsh
 	context.BaseFee = baseFee
 	if t.json.Env.Difficulty != nil {
 		context.Difficulty = new(big.Int).Set(t.json.Env.Difficulty)
+	}
+	if config.IsCancun(new(big.Int)) && t.json.Env.ExcessBlobGas != nil {
+		context.BlobBaseFee = eip4844.CalcBlobFee(*t.json.Env.ExcessBlobGas)
 	}
 	evm := vm.NewEVM(context, txContext, statedb, config, vmconfig)
 	// Execute the message.
@@ -290,7 +312,7 @@ func (t *StateTest) gasLimit(subtest StateSubtest) uint64 {
 	return t.json.Tx.GasLimit[t.json.Post[subtest.Fork][subtest.Index].Indexes.Gas]
 }
 
-func MakePreState(db ethdb.Database, accounts core.GenesisAlloc, snapshotter bool, scheme string) (*trie.Database, *snapshot.Tree, *state.StateDB) {
+func MakePreState(db ethdb.Database, accounts types.GenesisAlloc, snapshotter bool, scheme string) (*trie.Database, *snapshot.Tree, *state.StateDB) {
 	tconf := &trie.Config{Preimages: true}
 	if scheme == rawdb.HashScheme {
 		tconf.HashDB = hashdb.Defaults
@@ -332,9 +354,12 @@ func (t *StateTest) genesis(config *params.ChainConfig) *core.Genesis {
 }
 
 func (tx *stTransaction) toMessage(ps stPostState, baseFee *big.Int) (core.Message, error) {
-	// Derive sender from private key if present.
 	var from common.Address
-	if len(tx.PrivateKey) > 0 {
+	// If 'sender' field is present, use that
+	if tx.Sender != nil {
+		from = *tx.Sender
+	} else if len(tx.PrivateKey) > 0 {
+		// Derive sender from private key if needed.
 		key, err := crypto.ToECDSA(tx.PrivateKey)
 		if err != nil {
 			return nil, fmt.Errorf("invalid private key: %v", err)
@@ -414,7 +439,7 @@ func (tx *stTransaction) toMessage(ps stPostState, baseFee *big.Int) (core.Messa
 	}
 
 	msg := types.NewMessage(from, to, tx.Nonce, value, gasLimit, gasPrice,
-		tx.MaxFeePerGas, tx.MaxPriorityFeePerGas, data, accessList, false, nil, nil, authList)
+		tx.MaxFeePerGas, tx.MaxPriorityFeePerGas, data, accessList, false, tx.BlobGasFeeCap, tx.BlobVersionedHashes, authList)
 	return msg, nil
 }
 
