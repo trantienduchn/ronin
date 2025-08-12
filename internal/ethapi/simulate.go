@@ -108,6 +108,7 @@ type simOpts struct {
 	TraceTransfers         bool
 	Validation             bool
 	ReturnFullTransactions bool
+	miner                  string
 }
 
 // simChainHeadReader implements ChainHeaderReader which is needed as input for FinalizeAndAssemble.
@@ -167,6 +168,7 @@ func (m *simChainHeadReader) StateCache() state.Database {
 // it is not safe for concurrent use.
 type simulator struct {
 	b              Backend
+	engine         consensus.Engine
 	state          *state.StateDB
 	base           *types.Header
 	chainConfig    *params.ChainConfig
@@ -344,7 +346,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 	}
 
 	chainHeadReader := &simChainHeadReader{ctx, sim.b}
-	b, _, err := sim.b.Engine().FinalizeAndAssemble(chainHeadReader, header, sim.state, txes, nil, receipts)
+	b, _, err := sim.engine.FinalizeAndAssemble(chainHeadReader, header, sim.state, txes, nil, receipts)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -476,17 +478,18 @@ func (sim *simulator) makeHeaders(blocks []simBlock) ([]*types.Header, error) {
 }
 
 func (sim *simulator) newSimulatedChainContext(ctx context.Context, headers []*types.Header) *ChainContext {
-	return NewChainContext(ctx, &simBackend{base: sim.base, b: sim.b, headers: headers})
+	return NewChainContext(ctx, &simBackend{base: sim.base, b: sim.b, engine: sim.engine, headers: headers})
 }
 
 type simBackend struct {
 	b       ChainContextBackend
+	engine  consensus.Engine
 	base    *types.Header
 	headers []*types.Header
 }
 
 func (b *simBackend) Engine() consensus.Engine {
-	return b.b.Engine()
+	return b.engine
 }
 
 func (b *simBackend) HeaderByNumber(ctx context.Context, number rpc.BlockNumber) (*types.Header, error) {

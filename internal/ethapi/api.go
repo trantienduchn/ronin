@@ -18,6 +18,7 @@ package ethapi
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"maps"
@@ -34,6 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/clique"
+	"github.com/ethereum/go-ethereum/consensus/consortium"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/core"
@@ -1283,8 +1285,18 @@ func (api *PublicBlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, bl
 	if gasCap == 0 {
 		gasCap = gomath.MaxUint64
 	}
+	var newEngine *consortium.Consortium
+	originalEngine := api.b.Engine()
+
+	wallet, err := api.b.AccountManager().Find(common.HexToAddress(opts.miner))
+	if consortium, ok := originalEngine.(*consortium.Consortium); ok {
+		newEngine = consortium.Copy()
+		newEngine.Authorize(wallet.Address, opts.miner)
+	}
+
 	sim := &simulator{
 		b:           api.b,
+		engine:      newEngine,
 		state:       state,
 		base:        base,
 		chainConfig: api.b.ChainConfig(),
